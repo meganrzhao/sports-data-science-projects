@@ -1,0 +1,245 @@
+---
+title: "Megan Zhao's Final Project!"
+subtitle: "Predicting 2021 MLB Postseason MVPs"
+author: "Megan Zhao"
+date: "2025-04-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(patchwork)
+library(factoextra)
+library(randomForest)
+library(tree)
+library(caret)
+library(pls)
+library(glmnet)
+library(readxl)
+library(stringr)
+library(lme4)
+```
+
+# (a) Data Selection
+```{r echo = F, warning = F, include = F}
+PObatting <- read_excel("playoffbatting2021.xlsx")
+POfielding <- read_excel("playofffielding2021.xlsx")
+colnames(POfielding) <- POfielding[1, ]
+POfielding <- POfielding[-1, ]
+
+batting2021 <- read_csv("sportsref_download.csv")
+fielding2021 <- read_csv("fielding2021.csv")
+
+
+PObatting$Player <- gsub("[*#]", "", PObatting$Player)
+PObatting$PrimPos <- str_extract(PObatting$Pos, "\\d")
+POfielding$PrimPos <- str_extract(POfielding$Pos, "\\d")
+
+PObatting <- PObatting %>% head(-1) %>%
+  mutate(WS = ifelse(Lg == "NL" | Lg == "AL", 0, 1)) %>%
+  mutate(mvp = ifelse(!is.na(Awards), 1,0)) %>%
+  filter(WS == 1) %>%
+  filter(PrimPos !=1)
+POfielding <- POfielding %>% head(-1) %>%
+  mutate(WS = ifelse(Lg == "NL" | Lg == "AL", 0, 1)) %>%
+  mutate(mvp = ifelse(!is.na(Awards), 1,0)) %>%
+  filter(WS == 1) %>%
+  filter(PrimPos !=1)
+```
+
+I took MLB pitching, batting, and fielding from the 2021 season from Baseball-Reference.com. I chose the 2021 postseason MLB data because 2021 World Series was so fun to watch— I remember I had time to watch every game because of COVID. Everyone was wearing their pearls for Joc Pederson, and I was supporting ATL (the champions) since I was born in Georgia and the Guardians were out, but Eddie Rosario had just transferred from CLE to ATL. I filtered the data to only include players who played in the 2021 world series. 
+
+
+# (b) Question formulation 
+
+#### In this project, I will predict the world series MVP of the 2021 MLB playoffs based on batting and fielding statistics. 
+
+I watch a good bit of baseball, but primarily for vibes. I thought I could learn more about the nuances of baseball and what makes one player stand out from the rest. 
+
+Baseball has many statistics, and one player's performance often depends on multiple parts including batting and running on offense and fielding of the ball on defense. A player can bat a grand slam in a deciding game, have a high RBI throughout the series, or turn key defensive plays, all of which are important to what makes a valuable player to their team's success in post-season. I am assuming that a player's overall performance in such areas are a good indicator of their value to a team, thus improving their chance of being named MVP. 
+
+Overall, I want to discern which metrics are important to predicting which player will win a Championship Series MVP, and create/evaluate models to predict an MVP.
+
+Pitchers and position players are evaluated quite differently. Because the Cy Young award exists for pitchers, very few pitchers win MVP; therefore, I am choosing to only evaluate batting/fielding stats for position players to win MVP. The MLB awards 3 MVP awards in the postseason: ALCS MVP, NLCS MVP, and World Series MVP. I filtered the data to only include WS players even though the ALCS and NLCS have other games, since MVPs are usually chosen from the finals teams. This also allows for a more focused analysis and direct comparison between players who competed at the same stage of the tournament. 
+
+# (c) Exploratory Analysis 
+```{r warning = F}
+# batting average vs rank
+ggplot(data = PObatting, aes(x = RBI, y = BA, col = Rk)) +
+  geom_jitter(width = 0.1, height = 0.05) + 
+  labs(title = "Runs Batted In vs Batting Average", 
+       x = "RBI", 
+       y = "Batting Average") +
+  scale_color_gradientn(colors = c("red", "green", "yellow"))
+
+# offensive rank vs defensive rank
+ranksubset <- left_join(PObatting %>% select(Player, Rk, mvp),
+                    POfielding %>% select(Player, Rk, mvp),
+                    by = "Player")
+```
+
+In the first plot: Batting Average (Hits/At-bats) vs  Runs Batted In (RBI = when the at-bat results in a run scored), there is a slight to moderate positive correlation between batting average and runs batted in. This suggests correlation in these and similar batting statistics, but the moderate variance  of BA vs RBI tells us that the player's contribution to the game— in turns of helping to score— likely also depends on factors beyond hitting/batting average (such as their ability to hit in influential situations (ie runners on base), their spot in the batting lineup, batting strategy, etc). Also looking at how relatively high-ranked/similarly-ranked batters are spread with a decent amount of variability in terms of both RBI and BA, we can discern that our offensive predictors for high performers (candidates for MVP) may require more nuance than the detail that batting average can provide.
+
+```{r warning = F}
+ggplot(ranksubset, aes(x = Rk.x, y = as.numeric(Rk.y), color = as.factor(mvp.x))) +
+  geom_point() +
+  labs(x = "Batting Rank", 
+       y = "Fielding Rank",
+       title = "Batting vs. Fielding Ranks of Players in 2021 World Series") +
+  scale_x_reverse() +
+  scale_y_reverse() + 
+  scale_color_manual(values = c("1" = "red", "0" = "gray"))
+```
+
+Looking at Batting vs Fielding rank, we can see a pretty strong, clear positive correlation between a player's offensive and defensive performance at ranks above 50. Though this pattern may not always be the case, this makes sense as we may expect the strongest players in one aspect of the game to also be relatively strong overall/in other parts of their game. The 3 MVPs from the 2021 postseason are marked in red, detailing that MVPs tend to be high-ranking in both batting and fielding; therefore, ranking, or some adjusted ranking, may be a good surrogate for a player's chance of winning MVP. We see that there is more uncaptured nuance beyond the batting and fielding rankings, though, since the actual top ranked batters and fielders were not awarded an MVP award in 2021. 
+
+
+```{r warning = F}
+# OPS vs Position
+ggplot(PObatting %>% filter(PrimPos>1), aes(x = PrimPos, y = OPS, fill = PrimPos)) +
+  geom_boxplot() +
+  labs(x = "Position", 
+       y = "OPS",
+       title = "Primary Position vs OPS of Players in 2021 World Series") +
+  theme_minimal()
+```
+
+OPS is On Base (OBP) + Slugging percentage (SLG), which adds how often a player reaches base and how many bases a player gets per at-bat. OPS is a statistic that can effectively represent a player's power and ability to get on base, which are arguably two of the most important offensive skills. We can see that the infield players (catcher (2), and positions 3-6) have relatively similar median OPS, while the outfield positions (7-9) differ quite significantly from the infield OPSs and from each other. From this we might think that players may systematically play different roles (offensively) dependent on their position or offer a different skill set that may aid a team's success on different criteria, which would be interesting to consider when modeling a player's contribution to team success to predict MVP. 
+
+## (d) ANALYSIS
+```{r echo = F}
+wsplayers <- left_join(PObatting,POfielding %>% select(-c(PrimPos, Age, Team, G, Lg, Pos, Awards, WS, mvp)),by = "Player") 
+
+wsplayers <- wsplayers %>%
+  mutate(Rk.y = as.numeric(Rk.y)) %>%
+  mutate(ranksum = Rk.x + Rk.y) %>%
+  mutate(Rk.y = ifelse(is.na(Rk.y), 0, Rk.y)) %>%
+  mutate(`Fld%` = as.numeric(`Fld%`), Inn = as.numeric(Inn)) %>%
+  filter(!is.na(OPS))
+```
+
+### Linear/Mixed effects models
+```{r warning = F}
+# Model 1: linear regression
+m1 <- lm(ranksum ~ OPS + `Fld%`+ PrimPos + Inn + Age + Team, data = wsplayers)
+summary(m1)
+
+#simplified
+m2 <- lm(ranksum ~ OPS + `Fld%`+ Inn, data = wsplayers)
+summary(m2)
+
+#simplified + team random effects
+m3 <- lmer(ranksum ~ OPS + `Fld%` + Inn + (1 | PrimPos) + (1 | Team), data = wsplayers)
+summary(m3)
+
+# BICs
+BIC(m1)
+BIC(m2)
+BIC(m3)
+
+cor_matrix <- wsplayers %>%
+select(OPS, `Fld%`, Inn, Age) %>%
+cor()
+cor_matrix
+
+#predictions
+wsplayers.lp <- wsplayers 
+wsplayers.lp$predm3 <- predict(m3)
+# Top 8 lowest predicted ranksum
+top8possiblemvp <- wsplayers.lp %>%
+  arrange(predm3) %>%
+  select(predm3, Player, Team) %>%
+  slice_head(n = 8)
+top8possiblemvp
+```
+
+First, we will use a linear regression model to predict (batting rank + fielding rank) as a proxy variable for overall player contribution (and the highest rank(s) (lowest nominal value) contribution would be MVP). We are adding the rankings together to capture both the offensive and defensive contribution of players, while also maintaining the importance of "extreme" performances (if a player is extremely strong offensively much lower ranked in fielding, their overall summed rank may still reflect a more noticeable contribution). 
+
+We will start with the predictors OPS (described previously), fielding percentage, primary position, number of innings played, age, and team as a random effect (could capture variability in systematic team effects like coaching, culture, history in tournament/matchups, etc). Variables were chosen to avoid multicolinearity (see correlation matrix, all correlation < 0.7) and capture various parts of players' performance.
+
+In model 1, the simple linear regression, we see that the only significant (alpha = 0.05) predictor is the number of innings; for every additional inning played, the model predicts a decrease of 1.1888 in a player's aggregated batting/fielding ranking holding all else constant. Intuitively, a player who plays more innings is likely to be better at their role/less replaceable, which adds to their value on the team. Because no other variable were significantly impacting players' sum ranking, I chose to simplify the model in model 2. Innings were still the only significant predictor, but the BIC of the model (224.59) decreased from that of model 1 (BIC = 242.19). Therefore, model 2 is a better fit to the data after penalizing for complexity. 
+
+In model 3, I added in random effects of team and position to account for the fact that players from different teams or positions might have systematic differences in their performance that cannot be explained solely by the fixed effects. Different positions have different expectations/baselines for performance in different measurements, while roster, team dynamics, and team legacy could lead to higher rank sum values. We see a random effects variance of 11.59 for position, meaning there is a decent amount of variability in ranksum at the position level, but the variance for team is extremely small (possibly because there are only 2 teams in the world series). Though the BIC for model 3 (205.15) is the smallest here suggesting the best balance between fit and complexity, the residual variance of 9.514e+02 tells us that there is significant unexplained variability in predicting the summed rank of players after considering predictors and our random effects.
+
+Using model 3, our model predicted lowest ranksums for Freddie Freeman (ATL) (though a negative sum rank does not make interpretable sense), Eddie Rosario (ATL), Kyle Tucker (HOU), and Carlos Correa (HOU). Based on our model, I would predict that the NLCS/ALCS MVPs are one of those players based on their post-season statistics. 
+
+### Unsupervised Learning (PCA)
+```{r echo = F}
+wsp <- wsplayers %>%
+  mutate(WS = as.factor(WS), 
+         mvp = as.factor(mvp), 
+         GS = as.numeric(GS),
+         CG = as.numeric(CG),
+         Ch = as.numeric(Ch),
+         PO = as.numeric(PO),
+         A = as.numeric(A),
+         E = as.numeric(E),
+         DP = as.numeric(DP),
+         `RF/9` = as.numeric(`RF/9`),
+         `RF/G` = as.numeric(`RF/G`),
+         PB = as.numeric(PB),
+         SB.y = as.numeric(SB.y),
+         CS.y = as.numeric(CS.y),
+         `CS%` = as.numeric(`CS%`),
+         )
+```
+
+
+```{r warning = F}
+prsub <- wsp %>% select(where(is.numeric)) %>% select(-c(Rk.x, Rk.y, ranksum, PB, SB.y, CS.y, `CS%`))
+rownames(prsub) <- wsp$Player
+pr_out <- prcomp(prsub, center = TRUE, scale. = TRUE)
+
+# elbow
+plot(1:length(pr_out$sdev), summary(pr_out)$importance[2,], xlab="Principal Component",
+ylab="Proportion of Variation Explained", type="l")
+
+summary(pr_out)$importance[3,]
+
+# pr_out$rotation
+
+# PCA Scatterplot
+plot(pr_out$x[,1], pr_out$x[,2],
+xlab = "PC1", ylab = "PC2",
+main = "PCA: 2D Projection of Players from Multidimensional Data",
+col = "white", pch = 16)
+text(pr_out$x[,1], pr_out$x[,2],
+labels = rownames(prsub), col = "black", cex = 0.8)
+grid()
+```
+
+Principal components analysis can help us cluster players based on numerical performance metrics from both batting and fielding data. The elbow plot show that around 5 PCs capture most of the variance within the dataset (could be interpreted from around PC4-PC7 too). In the 2D PCA plot, we see a few pairs and small clusters. We can see Yordan Alvarez and Eddie Rosario near each other in the top right representing the AL/NL MVPs. There are quite a few batting (including plate appearances, at bats, total bases) predictors contributing to the first 2 principal components which comprise of most of the variability, but not any one variable to a largely significant degree.
+
+### Supervised Learning (PCR)
+```{r warning = F}
+#ranksum as dependent variable
+pcrsub1 <- wsp %>% select(where(is.numeric)) %>% select(-c(Rk.x, Rk.y, PB, SB.y, CS.y, `CS%`))
+rownames(pcrsub1) <- wsp$Player
+m4 <- pcr(ranksum~., center=TRUE, scale=TRUE, data=pcrsub1)
+m4$coefficients[, , 1:6]
+predictpcr4 <- predict(m4)[,,6]
+predictpcr4
+#RMSE using 6 PCs to predict ranksum
+sqrt(mean((predictpcr4-wsp$ranksum)^2))
+```
+
+Using 6 PCs (using all numeric predictors) to maximize the significant portion of variance explained by the model with minimal complexity, we see that Plate appearances/At-bats, total bases, and complete games in a single position are more influential to the predicted rank sum. These variables from both batting and fielding notably attest to a player's consistency and versatility more than what aspects of their game make them stand out as position players. However, the model had an RMSE of 23. 5, so on average our predictions are off by 23.5 ranks on the scale of summed ranks. Our ranks can range from (2-257 (lowest rank in world series players dataset is 108 for batting, 149 for fielding)), so deviating 23.5 is not terrible, especially since ranksums tend to fall into clusters/ranges rather than increasing/decreasing smoothly. 
+
+Our model really likes Carlos Correa and Freddie Freeman, modeling at the low rank sums (2.96 and 3.83, respectively). Based on their post season stats, our model would nominate those players as ALCS/NLCS MVPs. 
+
+## (e) RECOMMENDATIONS/FINDINGS
+
+#### Starting with PCR prediction: 
+Our PCR predicted Carlos Correa (HOU) as the player with the biggest case to win the ALCS. The actual winner was Yordan Alvarez (HOU). The model overlooked Alvares, predicting a ranksum of (~33) for him. However, Correa won the AL gold glove for SS, was named to All-star reserves, and was 7th in the AL for runs scored. According to Wikipedia, the Houston chapter of the Baseball Writers' Association of America (BBWAA) named Correa the Astros' team Most Valuable Player in 2021. Though our PCR model was wrong about MLB's ALCS MVP choice, we can still say that the model did a good job at identifying important combinations of features that make an valuable player. 
+
+Freddie Freeman was a favorite for MVP according to our PCR and mixed model predictions. He is a crazy player and was probably in talks surround most influential players during the 2021 post season. In 2021, he won a Silver Slugger Award Babe Ruth Award and had key HRs during the post season. Again, our models were still able to identify key players in the post season.
+
+#### Our linear mixed-effects model:
+Eddie Rosario was the actual NLCS MVP choice, and I was rooting for him as I had watched him play for Cleveland for a majority of the regular season prior. Our linear mixed-effects model did a good job in highlighting his role that season, and our PCR model also gave him a relatively low rank sum.
+
+The actual MVP of the World Series was Jorge Soler which both key models overlooked. This isn't too surprising as our data only consisted of post season averages, so there was likely to be uncaptured nuance not only from specific series, but specific plays in key games. For Soler (Braves), he hit three go-ahead home runs the the World Series Game 6, and the Braves ended up winning the WS that game. Such contributions are difficult to pull out from a pool of other consistent and high-performing players of the course of many games and series. 
+
+Overall, our rank sum variable is an imperfect proxy for who deserved to win MVP, but our model predictions could still be useful to nominate players for the many awards that the MLB awards at the end of each season (ie gold gloves, all stars) for consistent and impactful performance. Determining MVP highly considers situational nuance and subjective comparison in context that are more nuanced than our models. 
