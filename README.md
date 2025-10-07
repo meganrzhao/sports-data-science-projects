@@ -1,0 +1,1 @@
+A collection of sports analytics experiments exploring predictive modeling, forecasting, segmentation, and decision support. Projects include classic regressions and modern ML approaches applied to topics like game outcome prediction, player performance modeling
